@@ -1,6 +1,7 @@
-node_modules/
-.next/
-.npm-cache/
-.data/
-*.tsbuildinfo
-next-env.d.ts
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+.idea/
+*.log
