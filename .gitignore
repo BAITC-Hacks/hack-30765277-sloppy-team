@@ -66,3 +66,10 @@ htmlcov/
 *.log
 .DS_Store
 Thumbs.db
+
+# Local Node.js dependencies and build artifacts
+node_modules/
+.next/
+.npm-cache/
+next-env.d.ts
+*.tsbuildinfo
