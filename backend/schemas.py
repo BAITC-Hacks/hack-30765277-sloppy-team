@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+CardText = Annotated[str, StringConstraints(max_length=20000)]
 DraftText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20000)]
 
 
@@ -31,15 +32,15 @@ class BuildCardRequest(Schema):
 
 
 class TaskCard(Schema):
-    title: NonEmptyText = Field(description="Название задачи без вымышленных фактов")
-    context: str | None = Field(default=None, description="Контекст и потребность")
-    data_materials: str | None = Field(default=None, description="Данные и материалы")
-    expected_result: str | None = Field(default=None, description="Ожидаемый результат")
-    success_criteria: str | None = Field(default=None, description="Критерии успеха")
-    constraints: str | None = Field(default=None, description="Ограничения")
-    target_audience: str | None = Field(default=None, description="Пользователи / ЦА")
-    contacts: str | None = Field(default=None, description="Контактное лицо")
-    interaction_format: str | None = Field(default=None, description="Формат консультаций и обратной связи")
+    title: NonEmptyText = Field(max_length=500, description="Название задачи без вымышленных фактов")
+    context: CardText | None = Field(default=None, description="Контекст и потребность")
+    data_materials: CardText | None = Field(default=None, description="Данные и материалы")
+    expected_result: CardText | None = Field(default=None, description="Ожидаемый результат")
+    success_criteria: CardText | None = Field(default=None, description="Критерии успеха")
+    constraints: CardText | None = Field(default=None, description="Ограничения")
+    target_audience: CardText | None = Field(default=None, description="Пользователи / ЦА")
+    contacts: CardText | None = Field(default=None, description="Контактное лицо")
+    interaction_format: CardText | None = Field(default=None, description="Формат консультаций и обратной связи")
 
 
 class ScoringResult(Schema):

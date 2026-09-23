@@ -1,12 +1,30 @@
-import {test} from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {emptyCard,scoreCard,taskStatus,safeUrl,seedTasks} from '../lib/domain';
-test('scoring uses optional fields and ignores whitespace',()=>{
- assert.equal(scoreCard(emptyCard),0);
- assert.equal(scoreCard({...emptyCard,title:'Test',context:'Business need'}),30);
- assert.equal(scoreCard({...emptyCard,contacts:'   '}),0);
- assert.equal(scoreCard(Object.fromEntries(Object.keys(emptyCard).map(k=>[k,'filled'])) as typeof emptyCard),100);
+import { emptyCard, safeUrl, seedTasks, normalizeCard, toBackendCard, fromBackendCard } from '../lib/domain';
+import { cardInput, object } from '../lib/validation';
+import { scoringResponse } from '../lib/backend-client';
+test('card adapter preserves all scoring fields and missing values', () => {
+    const card = { ...emptyCard, title: 'Task', context: 'Need', data: 'Materials', criteria: 'Measurable success', expected_result: 'Result', target_audience: 'Users', interaction_format: 'Weekly feedback' };
+    assert.deepEqual(fromBackendCard(toBackendCard(card)), card);
+    assert.equal(toBackendCard(emptyCard).contacts, null);
+    assert.equal(normalizeCard({ title: 'Legacy task' }).expected_result, '');
 });
-test('status boundaries',()=>{assert.equal(taskStatus(69),'WORKING');assert.equal(taskStatus(70),'READY');assert.equal(taskStatus(84),'READY');assert.equal(taskStatus(85),'PRIORITY')});
-test('external links reject executable schemes',()=>{assert.equal(safeUrl('javascript:alert(1)'),null);assert.equal(safeUrl('data:text/html,hello'),null);assert.equal(safeUrl('https://example.com'),'https://example.com/')});
-test('seed scores agree with live calculation',()=>{for(const t of seedTasks()){assert.equal(t.score,scoreCard(t.card_data));assert.equal(t.status,taskStatus(t.score))}});
+test('links reject executable schemes and input types are validated', () => {
+    assert.equal(safeUrl('javascript:alert(1)'), null);
+    assert.equal(safeUrl('data:text/html,hello'), null);
+    assert.equal(safeUrl('https://example.com'), 'https://example.com/');
+    for (const value of [null, [], 42, 'text'])
+        assert.throws(() => object(value));
+    assert.throws(() => cardInput({ ...emptyCard, title: 4 }));
+    assert.throws(() => cardInput({ ...emptyCard, links: 'javascript:alert(1)' }));
+    assert.throws(() => cardInput({ ...emptyCard, context: 'x'.repeat(20001) }));
+});
+test('malformed upstream scoring cannot enter catalog', () => {
+    for (const value of [null, {}, { score: 101 }, { score: 20, status: 'READY', breakdown: {}, missing_fields: [] }])
+        assert.throws(() => scoringResponse(value));
+});
+test('legacy seed cards can be adapted without modifying storage', () => {
+    assert.ok(seedTasks().length >= 5);
+    for (const task of seedTasks())
+        assert.doesNotThrow(() => cardInput(normalizeCard(task.card_data)));
+});

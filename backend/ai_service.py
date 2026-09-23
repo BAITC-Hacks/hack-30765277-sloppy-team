@@ -22,6 +22,19 @@ from schemas import AnswerItem, ClarifyResponse, TaskCard
 logger = logging.getLogger(__name__)
 ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
 
+DEMO_QUESTIONS = (
+    ("expected_result", "Какой конкретный результат должна передать команда?"),
+    ("data_materials", "Какие данные и материалы доступны команде?"),
+    ("success_criteria", "По каким измеримым признакам вы примете результат?"),
+)
+
+
+def get_mode() -> str:
+    mode = os.environ.get("AI_MODE", "openai").strip().lower()
+    if mode not in {"openai", "demo"}:
+        raise AIServiceError("Укажите AI_MODE=openai или AI_MODE=demo.", 503)
+    return mode
+
 SYSTEM_RULES = """Ты помогаешь предпринимателю описать бизнес-задачу для студентов.
 КАТЕГОРИЧЕСКИ запрещено додумывать или измышлять факты, которых пользователь
 не сообщил. Не придумывай числа, сроки, бюджеты, контакты, материалы и требования.
@@ -85,6 +98,8 @@ async def _generate(schema: type[ResponseModel], instruction: str, payload: dict
 
 
 async def generate_clarifying_questions(draft_text: str) -> list[str]:
+    if get_mode() == "demo":
+        return [question for _, question in DEMO_QUESTIONS]
     result = await _generate(
         ClarifyResponse,
         "Составь ровно 3 разных точечных вопроса по самым важным недостающим "
@@ -98,6 +113,13 @@ async def generate_clarifying_questions(draft_text: str) -> list[str]:
 
 
 async def build_task_card(draft_text: str, qa_pairs: list[AnswerItem]) -> TaskCard:
+    if get_mode() == "demo":
+        # Copy only explicit answers to known questions; unknown details stay null.
+        answers = {pair.question: pair.answer.strip() or None for pair in qa_pairs}
+        return TaskCard(
+            title=draft_text[:75], context=draft_text,
+            **{field: answers.get(question) for field, question in DEMO_QUESTIONS},
+        )
     return await _generate(
         TaskCard,
         "Собери карточку задачи из черновика и ответов. Верни все поля схемы. "

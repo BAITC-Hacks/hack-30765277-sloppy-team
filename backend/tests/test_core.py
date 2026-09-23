@@ -59,7 +59,7 @@ class APITests(unittest.TestCase):
     def setUp(self):
         self.mode = "ok"
         self.calls = []
-        self.enterContext(patch.dict(os.environ, {"OPENAI_API_KEY": "fake-test-key"}))
+        self.enterContext(patch.dict(os.environ, {"OPENAI_API_KEY": "fake-test-key", "AI_MODE": "openai"}))
         self.enterContext(patch.object(ai_service, "AsyncOpenAI", self.client_factory))
         self.client = self.enterContext(TestClient(app))
 
@@ -148,6 +148,33 @@ class APITests(unittest.TestCase):
             response = self.client.post("/api/ai/clarify", json={"draft_text": "Task"})
         self.assertEqual(response.status_code, 503)
         self.assertEqual(self.calls, [])
+
+    def test_score_endpoint_without_ai(self):
+        response = self.client.post('/api/ai/score', json={"title": "Task", "context": "x" * 30})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["score"], 20)
+        self.assertEqual(response.json()["status"], "DRAFT")
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.client.post('/api/ai/score', json={"title": "Task", "context": "x" * 20001}).status_code, 422)
+
+    def test_demo_does_not_invent_missing_details(self):
+        with patch.dict(os.environ, {"AI_MODE": "demo", "OPENAI_API_KEY": ""}):
+            health = self.client.get('/health')
+            self.assertEqual(health.json()["ai_mode"], "demo")
+            questions = self.client.post('/api/ai/clarify', json={"draft_text": "Нужен отчёт"}).json()["questions"]
+            response = self.client.post('/api/ai/build-card', json={"draft_text": "Нужен отчёт", "qa_pairs": [
+                {"question": questions[0], "answer": ""},
+                {"question": "Выдуманный контакт?", "answer": "Не переносить в контакты"},
+            ]})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["mode"], "demo")
+            self.assertIsNone(response.json()["card"]["contacts"])
+            self.assertIsNone(response.json()["card"]["expected_result"])
+        self.assertEqual(self.calls, [])
+
+    def test_invalid_mode_is_reported(self):
+        with patch.dict(os.environ, {"AI_MODE": "invalid"}):
+            self.assertEqual(self.client.get('/health').status_code, 503)
 
 
 if __name__ == "__main__":

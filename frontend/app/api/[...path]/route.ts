@@ -1,13 +1,120 @@
-import {NextRequest,NextResponse} from 'next/server';
-import {getStore,updateStore} from '@/lib/store';
-import {Card,emptyCard,questions,scoreCard,taskStatus,safeUrl,Application} from '@/lib/domain';
-export const runtime='nodejs';
-const fail=(message:string,status=400)=>NextResponse.json({error:message},{status});
-export async function GET(req:NextRequest){const p=req.nextUrl.pathname;const db=await getStore();if(p==='/api/tasks')return NextResponse.json(db.tasks.sort((a,b)=>b.score-a.score));const match=p.match(/^\/api\/tasks\/([^/]+)(\/applications)?$/);if(match){const task=db.tasks.find(t=>t.id===match[1]);if(!task)return fail('Задача не найдена',404);return NextResponse.json(match[2]?db.applications.filter(a=>a.task_id===task.id):task);}return fail('Не найдено',404);}
-export async function POST(req:NextRequest){try{const b=await req.json();const p=req.nextUrl.pathname;
- if(p==='/api/ai/clarify'){if(typeof b.draft_text!=='string'||b.draft_text.trim().length<20)return fail('Опишите задачу подробнее — минимум 20 символов.');return NextResponse.json({questions,mode:'demo'});}
- if(p==='/api/ai/build-card'){if(typeof b.draft!=='string'||!Array.isArray(b.answers)||b.answers.length!==3||b.answers.some((a:unknown)=>typeof a!=='string'||!a.trim()))return fail('Ответьте на все три вопроса.');return NextResponse.json({card_data:{...emptyCard,title:b.draft.slice(0,75),context:b.draft,criteria:b.answers[0],data:b.answers[1],constraints:b.answers[2]},mode:'demo'});}
- if(p==='/api/tasks'||p==='/api/tasks/score'){if(!b.card_data||Object.keys(emptyCard).some(k=>typeof b.card_data[k]!=='string'))return fail('Некорректная карточка.');const card=b.card_data as Card;if(card.links&&!safeUrl(card.links))return fail('Укажите ссылку HTTP или HTTPS.');const score=scoreCard(card);if(p.endsWith('/score'))return NextResponse.json({score});if(!card.title.trim()||!card.context.trim())return fail('Заполните название и контекст.');const task={id:crypto.randomUUID(),card_data:card,score,status:taskStatus(score),created_at:new Date().toISOString()};await updateStore(db=>db.tasks.push(task));return NextResponse.json(task,{status:201});}
- if(p==='/api/applications'){if(['task_id','team_name','idea','plan'].some(k=>typeof b[k]!=='string'||!b[k].trim()))return fail('Заполните все обязательные поля.');if(b.prototype&&(typeof b.prototype!=='string'||!safeUrl(b.prototype)))return fail('Укажите корректную ссылку на прототип.');const result=await updateStore(db=>{if(!db.tasks.some(t=>t.id===b.task_id))throw Error('Задача не найдена');if(db.applications.some(a=>a.task_id===b.task_id&&a.status==='ACCEPTED'))throw Error('Команда уже выбрана');const application:Application={id:crypto.randomUUID(),task_id:b.task_id,team_name:b.team_name.trim(),idea:b.idea.trim(),plan:b.plan.trim(),prototype:b.prototype||'',status:'PENDING'};db.applications.push(application);return application;});return NextResponse.json(result,{status:201});}return fail('Не найдено',404);
- }catch(e){return fail(e instanceof Error?e.message:'Не удалось обработать запрос');}}
-export async function PATCH(req:NextRequest){try{const match=req.nextUrl.pathname.match(/^\/api\/applications\/([^/]+)\/status$/);if(!match)return fail('Не найдено',404);const {status}=await req.json();if(!['ACCEPTED','REJECTED'].includes(status))return fail('Некорректный статус');const app=await updateStore(db=>{const a=db.applications.find(a=>a.id===match[1]);if(!a)throw Error('Отклик не найден');if(db.applications.some(x=>x.task_id===a.task_id&&x.status==='ACCEPTED'))throw Error('Команда уже выбрана. Другие отклики заблокированы.');if(a.status!=='PENDING')throw Error('Отклик уже рассмотрен');a.status=status;return a;});return NextResponse.json({success:true,application:app});}catch(e){return fail(e instanceof Error?e.message:'Ошибка обновления',409);}}
+import { NextRequest, NextResponse } from 'next/server';
+import { AppError, publicError } from '@/lib/errors';
+import { object, text, cardInput, requireConfirmation } from '@/lib/validation';
+import { backendRequest, backendObject, scoreCard, scoringResponse } from '@/lib/backend-client';
+import { fromBackendCard, safeUrl } from '@/lib/domain';
+import * as service from '@/lib/task-service';
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+const json = (data: unknown, status = 200) => NextResponse.json(data, { status, headers: { 'Cache-Control': 'no-store' } });
+async function handle(fn: () => Promise<NextResponse>) {
+    try {
+        return await fn();
+    }
+    catch (error) {
+        const result = publicError(error);
+        return json({ error: result.error }, result.status);
+    }
+}
+async function body(req: NextRequest) {
+    if (!req.headers.get('content-type')?.includes('application/json'))
+        throw new AppError('Используйте application/json.', 415);
+    const reader = req.body?.getReader();
+    const decoder = new TextDecoder();
+    let raw = '';
+    let bytes = 0;
+    if (reader) {
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done)
+                    break;
+                bytes += value.byteLength;
+                if (bytes > 512000) {
+                    await reader.cancel();
+                    throw new AppError('Запрос слишком большой.', 413);
+                }
+                raw += decoder.decode(value, { stream: true });
+            }
+            raw += decoder.decode();
+        }
+        finally {
+            reader.releaseLock();
+        }
+    }
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw);
+    }
+    catch {
+        throw new AppError('Некорректный JSON.', 400);
+    }
+    return object(parsed);
+}
+export async function GET(req: NextRequest) {
+    return handle(async () => {
+        const p = req.nextUrl.pathname;
+        if (p === '/api/health')
+            return json(await backendRequest('/health'));
+        if (p === '/api/tasks')
+            return json(await service.listTasks());
+        const match = p.match(/^\/api\/tasks\/([^/]+)(\/applications)?$/);
+        if (match)
+            return json(match[2] ? await service.applicationsFor(match[1]) : await service.getTask(match[1]));
+        throw new AppError('Не найдено.', 404);
+    });
+}
+export async function POST(req: NextRequest) {
+    return handle(async () => {
+        const p = req.nextUrl.pathname;
+        const b = await body(req);
+        if (p === '/api/ai/clarify') {
+            const data = backendObject(await backendRequest(p, { draft_text: text(b.draft_text, 'Черновик', 20000) }));
+            if (!Array.isArray(data.questions) || data.questions.length !== 3 || data.questions.some(q => typeof q !== 'string' || !q.trim()) || !['demo', 'openai'].includes(String(data.mode)))
+                throw new AppError('AI-сервис вернул некорректные вопросы.', 502);
+            return json(data);
+        }
+        if (p === '/api/ai/build-card') {
+            if (!Array.isArray(b.qa_pairs) || b.qa_pairs.length !== 3)
+                throw new AppError('Передайте три пары вопрос–ответ.', 422);
+            const qa_pairs = b.qa_pairs.map(pair => { const qa = object(pair); return { question: text(qa.question, 'Вопрос', 2000), answer: text(qa.answer, 'Ответ', 10000, false) }; });
+            const data = backendObject(await backendRequest(p, { draft_text: text(b.draft_text, 'Черновик', 20000), qa_pairs }));
+            const card = backendObject(data.card);
+            const fields = ['title', 'context', 'data_materials', 'expected_result', 'success_criteria', 'constraints', 'target_audience', 'contacts', 'interaction_format'];
+            if (typeof card.title !== 'string' || !card.title.trim() || fields.some(k => card[k] !== null && typeof card[k] !== 'string') || !['demo', 'openai'].includes(String(data.mode)))
+                throw new AppError('AI-сервис вернул некорректную карточку.', 502);
+            return json({ card_data: fromBackendCard(card as Record<string, string | null>), scoring: scoringResponse(data.scoring), mode: data.mode });
+        }
+        if (p === '/api/tasks/score')
+            return json(await scoreCard(cardInput(b.card_data)));
+        if (p === '/api/tasks') {
+            requireConfirmation(b);
+            return json(await service.saveTask(cardInput(b.card_data)), 201);
+        }
+        if (p === '/api/applications') {
+            const prototype = text(b.prototype ?? '', 'Ссылка', 2000, false);
+            if (prototype && !safeUrl(prototype))
+                throw new AppError('Укажите корректную ссылку HTTP или HTTPS.', 422);
+            return json(await service.applyToTask({ task_id: text(b.task_id, 'Задача', 200), team_name: text(b.team_name, 'Команда', 200),
+                idea: text(b.idea, 'Идея'), plan: text(b.plan, 'План'), deadline: text(b.deadline, 'Срок', 200), prototype }), 201);
+        }
+        throw new AppError('Не найдено.', 404);
+    });
+}
+export async function PATCH(req: NextRequest) {
+    return handle(async () => {
+        const p = req.nextUrl.pathname;
+        const b = await body(req);
+        const task = p.match(/^\/api\/tasks\/([^/]+)$/);
+        if (task) {
+            requireConfirmation(b);
+            return json(await service.saveTask(cardInput(b.card_data), task[1]));
+        }
+        const match = p.match(/^\/api\/applications\/([^/]+)\/status$/);
+        if (!match)
+            throw new AppError('Не найдено.', 404);
+        if (b.status !== 'ACCEPTED' && b.status !== 'REJECTED')
+            throw new AppError('Некорректный статус.', 422);
+        return json({ success: true, application: await service.decideApplication(match[1], b.status) });
+    });
+}
