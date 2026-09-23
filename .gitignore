@@ -1,5 +1,6 @@
 .env
 .env.*
+!.env.example
 *.env
 .envrc
 
@@ -67,3 +68,23 @@ htmlcov/
 *.log
 .DS_Store
 Thumbs.db
+
+# Local Node.js dependencies and build artifacts
+node_modules/
+.next/
+.npm-cache/
+next-env.d.ts
+*.tsbuildinfo
+# PostgreSQL credentials, local clusters and test artifacts
+.pgpass
+pgpass.conf
+.pg_service.conf
+pg_service.conf
+.pgdata/
+.pilot-postgres/
+.pilot-private/
+*.sql.gz
+*.sql.zip
+api_keys.json
+api-keys.json
+api_key.txt

@@ -1,7 +1,12 @@
 node_modules/
+.env
+.env.*
+!.env.example
+generated/prisma/
 .next/
 .data/
 *.tsbuildinfo
 next-env.d.ts
 .npm-cache/
 .test-data-*/
+.env.local

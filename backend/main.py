@@ -1,5 +1,7 @@
 """AI Sana API. Python 3.11+. Run: python -m uvicorn main:app --reload."""
 
+import os
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -33,7 +35,9 @@ class BuildAPIResponse(BuildCardResponse):
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "ai_mode": ai_service.get_mode()}
+    mode = ai_service.get_mode()
+    return {"status": "ok", "ai_mode": mode,
+            "ai_configured": mode == "demo" or bool(os.environ.get("OPENAI_API_KEY", "").strip())}
 
 
 @app.post("/api/ai/clarify", response_model=ClarifyAPIResponse)

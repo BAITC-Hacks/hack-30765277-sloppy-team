@@ -19,6 +19,8 @@ export type Task = {
     status: 'PRIORITY' | 'READY' | 'WORKING' | 'DRAFT';
     created_at: string;
     scoring?: Scoring;
+    owner_id?: string;
+    applications_open?: boolean;
 };
 export type Application = {
     id: string;

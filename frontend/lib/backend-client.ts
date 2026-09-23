@@ -7,7 +7,7 @@ export function backendObject(value: unknown): Record<string, unknown> {
 }
 // Server configuration only: never put the OpenAI key in NEXT_PUBLIC_* variables.
 export async function backendRequest(path: string, body?: unknown): Promise<unknown> {
-    const base = (process.env.BACKEND_URL || 'http://127.0.0.1:8000').replace(/\/$/, '');
+    const base = (process.env.AI_BACKEND_URL || process.env.BACKEND_URL || 'http://127.0.0.1:8000').replace(/\/$/, '');
     try {
         const response = await fetch(base + path, {
             method: body === undefined ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json' },

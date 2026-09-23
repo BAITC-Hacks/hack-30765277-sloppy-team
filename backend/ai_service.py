@@ -4,7 +4,10 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 from typing import TypeVar
+
+from dotenv import load_dotenv
 
 from openai import (
     APIConnectionError,
@@ -20,6 +23,7 @@ from pydantic import BaseModel, ValidationError
 from schemas import AnswerItem, ClarifyResponse, TaskCard
 
 logger = logging.getLogger(__name__)
+load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
 
 DEMO_QUESTIONS = (
@@ -123,6 +127,13 @@ async def build_task_card(draft_text: str, qa_pairs: list[AnswerItem]) -> TaskCa
     return await _generate(
         TaskCard,
         "Собери карточку задачи из черновика и ответов. Верни все поля схемы. "
+        "Извлекай сведения по смыслу из всех ответов, независимо от вопроса: "
+        "expected_result — передаваемый результат или артефакт; success_criteria — "
+        "явно названные условия его приёмки или проверки. Например, требование "
+        "совпадения сумм с исходной таблицей является критерием успеха, даже если "
+        "оно сообщено в ответе о формате результата. Сам пример не является фактом "
+        "текущей задачи. Не оставляй поле пустым, если пользователь сообщил сведения "
+        "для него внутри другого ответа. "
         "Отсутствующие или противоречивые сведения — null. Явные исправления "
         "в ответах имеют приоритет над черновиком. Название title обязательно: "
         "сформулируй кратко только на основе исходного текста; если определить "

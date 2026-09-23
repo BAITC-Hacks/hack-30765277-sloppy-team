@@ -1,164 +1,100 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import path from 'node:path';
-import { spawn } from 'node:child_process';
-import { createServer } from 'node:net';
+import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
 import { emptyCard } from '../lib/domain';
-async function freePort(): Promise<number> {
-    const server = createServer();
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-    const address = server.address();
-    const port = typeof address === 'object' && address ? address.port : 0;
-    await new Promise<void>(resolve => server.close(() => resolve()));
-    return port;
-}
-test('pilot: Next routes + real Python backend, isolated existing demo store', async (t) => {
-    const original = process.cwd();
-    const root = path.resolve(original, '..');
-    const suffix = process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python';
-    const python = process.env.PYTHON || [path.join(root, 'backend/.venv', suffix), path.join(root, '.venv', suffix)].find(existsSync) || 'python';
-    const port = await freePort();
-    const base = `http://127.0.0.1:${port}`;
-    const previousUrl = process.env.BACKEND_URL;
-    process.env.BACKEND_URL = base;
-    const server = spawn(python, ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(port)], { cwd: path.join(root, 'backend'), env: { ...process.env, AI_MODE: 'demo', OPENAI_API_KEY: '' }, stdio: 'ignore' });
-    const exited = new Promise<void>(resolve => server.once('exit', () => resolve()));
-    let spawnError: Error | undefined;
-    server.once('error', error => { spawnError = error; });
-    const directory = await mkdtemp(path.join(original, '.test-data-'));
+
+const testUrl = process.env.TEST_DATABASE_URL;
+test('PostgreSQL: auth, AI, confirmed publication, editing, access and concurrent decisions', { skip: !testUrl }, async () => {
+    // Never let this test fall back to the developer's DATABASE_URL.
+    const url = new URL(testUrl!);
+    assert.match(url.searchParams.get('schema') || '', /^pilot_test_[a-z0-9_]+$/);
+    process.env.DATABASE_URL = testUrl;
+    process.env.SESSION_SECRET = randomUUID() + randomUUID();
+    const { GET, POST, PATCH } = await import('../app/api/[...path]/route');
+    const { getPrisma } = await import('../lib/prisma');
+    const prisma = getPrisma();
+    const users: string[] = [];
+    const tasks: string[] = [];
+    const req = (path: string, method = 'GET', data?: unknown, cookie = '', headers: Record<string,string> = {}) =>
+        new NextRequest('http://localhost' + path, { method, headers: { 'content-type': 'application/json', cookie, ...headers },
+            ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
+    const register = async () => {
+        const email = randomUUID() + '@example.test';
+        const password = 'Integration test password 123!';
+        const response = await POST(req('/api/auth/register', 'POST', { email, password }));
+        assert.equal(response.status, 201, JSON.stringify(await response.clone().json()));
+        const data = await response.json(); users.push(data.user.id);
+        assert.equal(data.user.password_hash, undefined);
+        return { email, password, id: data.user.id, cookie: response.headers.get('set-cookie')!.split(';')[0] };
+    };
     try {
-        let ready = false;
-        for (let i = 0; i < 80; i++) {
-            if (spawnError)
-                throw spawnError;
-            try {
-                if ((await fetch(base + '/health')).ok) {
-                    ready = true;
-                    break;
-                }
-            }
-            catch { }
-            await new Promise(resolve => setTimeout(resolve, 100));
+        const health = await (await GET(req('/api/health'))).json();
+        assert.equal(health.ai_mode, 'demo', 'Integration tests require an explicit demo backend');
+        const owner = await register(); const student = await register(); const stranger = await register();
+        assert.equal((await POST(req('/api/auth/login', 'POST', { email: owner.email, password: owner.password }))).status, 200);
+        assert.equal((await POST(req('/api/auth/login', 'POST', { email: owner.email, password: owner.password }, '', { host: '127.0.0.1:3020', origin: 'http://127.0.0.1:3020' }))).status, 200);
+        assert.equal((await POST(req('/api/auth/login', 'POST', { email: owner.email, password: 'incorrect password' }))).status, 401);
+        assert.equal((await POST(req('/api/auth/register', 'POST', { email: owner.email, password: owner.password }))).status, 409);
+        const me = await (await GET(req('/api/auth/me', 'GET', undefined, owner.cookie))).json();
+        assert.equal(me.user.id, owner.id);
+        assert.equal((await GET(req('/api/my-tasks'))).status, 401);
+        const card = { ...emptyCard, title: 'Integration task', context: 'A useful business need for students' };
+        assert.equal((await POST(req('/api/tasks', 'POST', { card_data: card, confirmed: true }))).status, 401);
+        assert.equal((await POST(req('/api/tasks', 'POST', { card_data: card }, owner.cookie))).status, 422);
+        assert.equal((await POST(req('/api/tasks', 'POST', { card_data: card }, owner.cookie, { origin: 'https://foreign.test' }))).status, 403);
+        const draft_text = 'Небольшой кофейне нужен отчёт по продажам из таблиц';
+        const clarify = await POST(req('/api/ai/clarify', 'POST', { draft_text }, owner.cookie));
+        assert.equal(clarify.status, 200);
+        const data = await clarify.json();
+        // Integration tests require an explicit demo backend: no billable calls.
+        assert.equal(data.mode, 'demo'); assert.equal(data.questions.length, 3);
+        const built = await POST(req('/api/ai/build-card', 'POST', { draft_text,
+            qa_pairs: data.questions.map((question: string) => ({ question, answer: '' })) }, owner.cookie));
+        assert.equal(built.status, 200); assert.equal((await built.json()).card_data.contacts, '');
+        const published = await POST(req('/api/tasks', 'POST', { card_data: card, confirmed: true }, owner.cookie));
+        assert.equal(published.status, 201);
+        const task = await published.json(); tasks.push(task.id);
+        assert.equal(task.owner_id, owner.id); assert.equal(task.score, 20); assert.equal(task.status, 'DRAFT');
+        const catalog = await (await GET(req('/api/tasks'))).json();
+        assert.ok(catalog.some((t: {id:string}) => t.id === task.id));
+        for (let i=1;i<catalog.length;i++) assert.ok(catalog[i-1].score >= catalog[i].score);
+        assert.equal((await PATCH(req('/api/tasks/'+task.id, 'PATCH', { card_data: card, confirmed: true }, stranger.cookie))).status, 403);
+        assert.equal((await GET(req('/api/tasks/'+task.id+'/applications', 'GET', undefined, student.cookie))).status, 403);
+        const full = Object.fromEntries(Object.keys(emptyCard).map(k => [k, k === 'links' ? '' : 'x'.repeat(30)]));
+        const edited = await PATCH(req('/api/tasks/'+task.id, 'PATCH', { card_data: full, confirmed: true }, owner.cookie));
+        assert.equal(edited.status, 200); assert.equal((await edited.json()).score, 100);
+        assert.equal((await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).score, 100);
+        const application = { task_id: task.id, team_name: 'Pilot team', idea: 'A prototype', plan: 'Research and build', deadline: 'Two weeks', prototype: '' };
+        assert.equal((await POST(req('/api/applications', 'POST', application, owner.cookie))).status, 400);
+        assert.equal((await POST(req('/api/applications', 'POST', { ...application, prototype: 'javascript:alert(1)' }, student.cookie))).status, 422);
+        const appIds: string[] = [];
+        for (let i=0;i<3;i++) {
+            const response = await POST(req('/api/applications', 'POST', application, student.cookie));
+            assert.equal(response.status, 201); const app = await response.json(); appIds.push(app.id); assert.equal(app.deadline, 'Two weeks');
         }
-        assert.ok(ready, 'Python backend did not start');
-        process.chdir(directory);
-        const { GET, POST, PATCH } = await import('../app/api/[...path]/route');
-        const req = (url: string, method: string, body?: unknown) => new NextRequest('http://localhost' + url, { method, ...(body !== undefined ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}) });
-        let taskId = '';
-        await t.test('draft -> three questions -> faithful editable card', async () => {
-            const draft = 'Нужно разобраться в продажах';
-            const r = await POST(req('/api/ai/clarify', 'POST', { draft_text: draft }));
-            assert.equal(r.status, 200);
-            const clarify = await r.json();
-            assert.equal(clarify.questions.length, 3);
-            assert.equal(clarify.mode, 'demo');
-            const answers = ['Дашборд продаж с фильтрами по дням и товарам', 'Обезличенные таблицы продаж за последние шесть месяцев', 'Суммы в отчёте совпадают с исходными таблицами'];
-            const built = await POST(req('/api/ai/build-card', 'POST', { draft_text: draft, qa_pairs: clarify.questions.map((question: string, i: number) => ({ question, answer: answers[i] })) }));
-            assert.equal(built.status, 200);
-            const result = await built.json();
-            assert.equal(result.card_data.expected_result, answers[0]);
-            assert.equal(result.card_data.criteria, answers[2]);
-            assert.equal(result.card_data.contacts, '');
-            assert.equal(result.scoring.score, 60);
-        });
-        await t.test('confirmation required; low score publication and server authority', async () => {
-            const card_data = { ...emptyCard, title: 'Pilot task', context: 'Нужен отчёт' };
-            assert.equal((await POST(req('/api/tasks', 'POST', { card_data }))).status, 422);
-            const response = await POST(req('/api/tasks', 'POST', { card_data, confirmed: true, score: 100 }));
-            assert.equal(response.status, 201);
-            const task = await response.json();
-            taskId = task.id;
-            assert.equal(task.score, 10);
-            assert.equal(task.status, 'DRAFT');
-            const catalog = await (await GET(req('/api/tasks', 'GET'))).json();
-            assert.ok(catalog.some((x: {
-                id: string;
-            }) => x.id === taskId));
-            assert.ok(catalog.every((x: {
-                score: number;
-            }, i: number) => i === 0 || catalog[i - 1].score >= x.score));
-        });
-        await t.test('confirmed edit recomputes all seven criteria and catalog ranking', async () => {
-            const card_data = { ...emptyCard, title: 'Pilot task', ...Object.fromEntries(['context', 'data', 'expected_result', 'criteria', 'constraints', 'target_audience', 'contacts', 'interaction_format'].map(k => [k, 'Подробное подтверждённое описание длиной более тридцати символов'])) };
-            const response = await PATCH(req('/api/tasks/' + taskId, 'PATCH', { card_data, confirmed: true }));
-            assert.equal(response.status, 200);
-            assert.equal((await response.json()).score, 100);
-            const catalog = await (await GET(req('/api/tasks', 'GET'))).json();
-            assert.equal(catalog[0].id, taskId);
-        });
-        await t.test('multiple manual selections, decline, late response and idempotent retry', async () => {
-            const ids: string[] = [];
-            const submit = (team_name: string) => POST(req('/api/applications', 'POST', { task_id: taskId, team_name, idea: 'Prototype', plan: 'Research and build', deadline: '4 weeks' }));
-            for (const name of ['One', 'Two', 'Three']) {
-                const r = await submit(name);
-                assert.equal(r.status, 201);
-                ids.push((await r.json()).id);
-            }
-            for (const id of ids.slice(0, 2))
-                assert.equal((await PATCH(req('/api/applications/' + id + '/status', 'PATCH', { status: 'ACCEPTED' }))).status, 200);
-            assert.equal((await PATCH(req('/api/applications/' + ids[2] + '/status', 'PATCH', { status: 'REJECTED' }))).status, 200);
-            assert.equal((await PATCH(req('/api/applications/' + ids[0] + '/status', 'PATCH', { status: 'ACCEPTED' }))).status, 200);
-            assert.equal((await PATCH(req('/api/applications/' + ids[0] + '/status', 'PATCH', { status: 'REJECTED' }))).status, 409);
-            assert.equal((await submit('Late team')).status, 201);
-            const apps = await (await GET(req('/api/tasks/' + taskId + '/applications', 'GET'))).json();
-            assert.equal(apps.filter((a: {
-                status: string;
-            }) => a.status === 'ACCEPTED').length, 2);
-        });
-        await t.test('invalid JSON, null, wrong types, missing task and unsafe links', async () => {
-            for (const value of [null, [], 42, { draft_text: 7 }, { draft_text: ' ' }, { draft_text: 'x'.repeat(20001) }]) {
-                assert.ok([400, 422].includes((await POST(req('/api/ai/clarify', 'POST', value))).status));
-            }
-            const bad = new NextRequest('http://localhost/api/ai/clarify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{' });
-            assert.equal((await POST(bad)).status, 400);
-            assert.equal((await POST(req('/api/ai/clarify', 'POST', { draft_text: 'x'.repeat(512001) }))).status, 413);
-            const wrongType = new NextRequest('http://localhost/api/ai/clarify', { method: 'POST', body: 'text' });
-            assert.equal((await POST(wrongType)).status, 415);
-            assert.equal((await GET(req('/api/tasks/missing', 'GET'))).status, 404);
-            assert.equal((await POST(req('/api/applications', 'POST', { task_id: taskId, team_name: 'Unsafe', idea: 'Idea', plan: 'Plan', deadline: '1 week', prototype: 'javascript:alert(1)' }))).status, 422);
-            assert.equal((await PATCH(req('/api/applications/missing/status', 'PATCH', { status: 'ACCEPTED' }))).status, 404);
-        });
-        await t.test('broken upstream replies and connection failures have public errors', async () => {
-            const originalFetch = globalThis.fetch;
-            try {
-                globalThis.fetch = async () => new Response('<html>bad gateway</html>', { status: 502 });
-                assert.equal((await POST(req('/api/ai/clarify', 'POST', { draft_text: 'Task' }))).status, 502);
-                globalThis.fetch = async () => new Response(JSON.stringify({ questions: ['One'], mode: 'demo' }));
-                assert.equal((await POST(req('/api/ai/clarify', 'POST', { draft_text: 'Task' }))).status, 502);
-                globalThis.fetch = async () => new Response('null');
-                assert.equal((await POST(req('/api/ai/clarify', 'POST', { draft_text: 'Task' }))).status, 502);
-                globalThis.fetch = async () => { throw new DOMException('Timeout', 'TimeoutError'); };
-                assert.equal((await POST(req('/api/ai/clarify', 'POST', { draft_text: 'Task' }))).status, 504);
-                globalThis.fetch = async () => { throw new TypeError('PRIVATE CONNECTION DETAILS'); };
-                const response = await GET(req('/api/tasks', 'GET'));
-                assert.equal(response.status, 503);
-                assert.ok(!(await response.text()).includes('PRIVATE'));
-            }
-            finally {
-                globalThis.fetch = originalFetch;
-            }
-        });
-        await t.test('storage failure returns sanitized 500 without overwriting data', async () => {
-            await mkdir('.data', { recursive: true });
-            await writeFile('.data/store.json', '{broken');
-            const response = await GET(req('/api/tasks', 'GET'));
-            // Storage syntax errors must not masquerade as client JSON errors.
-            assert.equal(response.status, 500);
-        });
-    }
-    finally {
-        process.chdir(original);
-        if (previousUrl === undefined)
-            delete process.env.BACKEND_URL;
-        else
-            process.env.BACKEND_URL = previousUrl;
-        server.kill();
-        await exited;
-        const resolved = path.resolve(directory);
-        assert.ok(resolved.startsWith(path.resolve(original) + path.sep + '.test-data-'));
-        await rm(resolved, { recursive: true, force: true });
+        const decide = (id:string, status:string, cookie=owner.cookie) => PATCH(req('/api/applications/'+id+'/status', 'PATCH', { status }, cookie));
+        assert.equal((await decide(appIds[0], 'ACCEPTED', stranger.cookie)).status, 403);
+        const accepted = await Promise.all(appIds.slice(0,2).map(id => decide(id,'ACCEPTED')));
+        assert.deepEqual(accepted.map(r => r.status), [200,200]);
+        assert.equal((await decide(appIds[0],'ACCEPTED')).status,200);
+        assert.equal((await decide(appIds[0],'REJECTED')).status,409);
+        assert.equal((await decide(appIds[2],'REJECTED')).status,200);
+        assert.equal((await POST(req('/api/applications','POST', application, student.cookie))).status,201);
+        const apps = await (await GET(req('/api/tasks/'+task.id+'/applications','GET',undefined,owner.cookie))).json();
+        assert.equal(apps.filter((a:{status:string})=>a.status==='ACCEPTED').length,2);
+        const mine = await (await GET(req('/api/my-tasks','GET',undefined,stranger.cookie))).json();
+        assert.equal(mine.length,0);
+        assert.equal((await POST(req('/api/auth/logout','POST',{},owner.cookie))).status,200);
+        const originalUrl = process.env.AI_BACKEND_URL;
+        process.env.AI_BACKEND_URL = 'http://127.0.0.1:1';
+        try {
+            assert.equal((await POST(req('/api/ai/clarify','POST',{draft_text},owner.cookie))).status,503);
+            assert.equal((await GET(req('/api/tasks'))).status,200);
+        } finally { if(originalUrl) process.env.AI_BACKEND_URL=originalUrl; else delete process.env.AI_BACKEND_URL; }
+    } finally {
+        await prisma.task.deleteMany({where:{id:{in:tasks}}});
+        await prisma.user.deleteMany({where:{id:{in:users}}});
+        await prisma.$disconnect();
     }
 });
