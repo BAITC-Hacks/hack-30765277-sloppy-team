@@ -1,0 +1,68 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum TaskStatus {
+  DRAFT
+  WORKING
+  READY
+  PRIORITY
+}
+
+enum ApplicationStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
+model Task {
+  id                 String        @id @default(uuid())
+  ownerId            String?
+  owner              User?         @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  title              String
+  company            String
+  category           String
+  context            String
+  data               String
+  expected_result    String        @default("")
+  constraints        String
+  criteria           String
+  target_audience    String        @default("")
+  contacts           String
+  interaction_format String        @default("")
+  links              String
+  score              Int
+  status             TaskStatus
+  createdAt          DateTime      @default(now()) @db.Timestamptz(3)
+  applications       Application[]
+
+  @@index([ownerId])
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+  tasks        Task[]
+}
+
+model Application {
+  id        String            @id @default(uuid())
+  taskId    String
+  teamName  String
+  idea      String
+  plan      String
+  prototype String            @default("")
+  status    ApplicationStatus @default(PENDING)
+  createdAt DateTime          @default(now()) @db.Timestamptz(3)
+  task      Task              @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  // The partial unique index for ACCEPTED applications is defined in migration SQL.
+
+  @@index([taskId, createdAt])
+}
