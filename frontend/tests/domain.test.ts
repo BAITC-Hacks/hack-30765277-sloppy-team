@@ -1,12 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {emptyCard,scoreCard,taskStatus,safeUrl,seedTasks} from '../lib/domain';
-test('scoring uses optional fields and ignores whitespace',()=>{
- assert.equal(scoreCard(emptyCard),0);
- assert.equal(scoreCard({...emptyCard,title:'Test',context:'Business need'}),30);
- assert.equal(scoreCard({...emptyCard,contacts:'   '}),0);
- assert.equal(scoreCard(Object.fromEntries(Object.keys(emptyCard).map(k=>[k,'filled'])) as typeof emptyCard),100);
-});
-test('status boundaries',()=>{assert.equal(taskStatus(69),'WORKING');assert.equal(taskStatus(70),'READY');assert.equal(taskStatus(84),'READY');assert.equal(taskStatus(85),'PRIORITY')});
+import {emptyCard,scoreCard,taskStatus,safeUrl,seedTasks,fromBackendCard} from '../lib/domain';
+test('scoring follows Python length boundaries',()=>{assert.equal(scoreCard(emptyCard),0);assert.equal(scoreCard({...emptyCard,context:'123456789'}),0);assert.equal(scoreCard({...emptyCard,context:'1234567890'}),10);assert.equal(scoreCard({...emptyCard,context:'x'.repeat(30)}),20);assert.equal(scoreCard({...emptyCard,expected_result:'x'.repeat(10)}),7);assert.equal(scoreCard({...emptyCard,contacts:'x'.repeat(30),interaction_format:'x'.repeat(30)}),10);});
+test('status boundaries match backend',()=>{assert.equal(taskStatus(39),'DRAFT');assert.equal(taskStatus(40),'WORKING');assert.equal(taskStatus(69),'WORKING');assert.equal(taskStatus(70),'READY');assert.equal(taskStatus(89),'READY');assert.equal(taskStatus(90),'PRIORITY')});
+test('backend nullable card maps to editor strings',()=>{const card=fromBackendCard({title:'Task',context:null,data_materials:null,expected_result:null,success_criteria:null,constraints:null,target_audience:null,contacts:null,interaction_format:null});assert.equal(card.context,'');assert.equal(card.category,'Разработка');});
 test('external links reject executable schemes',()=>{assert.equal(safeUrl('javascript:alert(1)'),null);assert.equal(safeUrl('data:text/html,hello'),null);assert.equal(safeUrl('https://example.com'),'https://example.com/')});
 test('seed scores agree with live calculation',()=>{for(const t of seedTasks()){assert.equal(t.score,scoreCard(t.card_data));assert.equal(t.status,taskStatus(t.score))}});
