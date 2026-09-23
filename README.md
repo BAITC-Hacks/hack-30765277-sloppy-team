@@ -1,2 +1,3 @@
-# hack-30765277-sloppy-team
-Hackathon team repository for Sloppy-team
+# Sloppy-team
+
+Фронтенд платформы «Практика» находится в [frontend](frontend/README.md). В этой папке — Next.js-приложение, API для демонстрации и инструкции по запуску.
