@@ -5,7 +5,8 @@ Hackathon team repository for Sloppy-team
 
 Python 3.11+, FastAPI, Pydantic v2, OpenAI `gpt-4o` Structured Outputs.
 
-Запуск в PowerShell из корня проекта:
+Модули, зависимости и тесты находятся в [backend](backend/README.md).
+Запуск в PowerShell из папки `backend` (сначала `cd backend` из корня проекта):
 
 ```powershell
 python -m venv .venv
